@@ -14,4 +14,9 @@ app.use('/api/account/',accountRouter)
 app.use('/api/transaction/',transactionRouter)
 
 
+app.get("/",(req,res)=>{
+   res.send('Server are running Succesfully')
+})
+
+
 module.exports=app;
