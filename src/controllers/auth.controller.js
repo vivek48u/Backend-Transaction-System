@@ -83,8 +83,9 @@ async function userLoginController(req, res) {
       id: user._id,
       email: user.email,
       password: user.password,
-      token
-    }
+    },
+    token
+
 
   })
 }
