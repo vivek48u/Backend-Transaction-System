@@ -3,37 +3,43 @@ const jwt = require('jsonwebtoken')
 const tokenBlackListModel=require('../models/balcklist.model')
 
 async function authMiddleware(req, res, next) {
-    const token = req.cookies.token || req.headers.authorization?.split(' ')[1]
+  // header first, cookie as fallback
+  const token = req.headers.authorization?.split(' ')[1] || req.cookies?.token
 
-    if (!token) {
-        return res.status(401).json({
-            message: 'unauthorized access, token is missing'
-        })
-    }
-
-    const isBlacklisted=await tokenBlackListModel.findOne({
-        token
+  if (!token || token === 'undefined' || token === 'null') {
+    return res.status(401).json({
+      message: 'unauthorized access, token is missing',
     })
+  }
 
-    if(isBlacklisted){
-        return res.status(401).json({
-            message:'Unauthorized access, token is invalid'
-        })
+  const isBlacklisted = await tokenBlackListModel.findOne({ token })
+  if (isBlacklisted) {
+    return res.status(401).json({
+      message: 'unauthorized access, token is blacklisted',
+    })
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWTSECRET_KEY)
+
+    const user = await userModel
+      .findById(decoded.userId ?? decoded.id)
+      .select('+systemUser')
+
+    if (!user) {
+      return res.status(401).json({
+        message: 'unauthorized access, user not found',
+      })
     }
-    try {
-        const decoded = jwt.verify(token, process.env.JWTSECRET_KEY)
 
-        const user = await userModel.findById(decoded.userId)
-
-        req.user = user
-
-        return next()
-    } catch (err) {
-        return res.status(401).json({
-            message: 'unauthorized access, token is invalid '
-        })
-    }
-
+    req.user = user
+    return next()
+  } catch (err) {
+    console.log('JWT error:', err.name, '-', err.message)
+    return res.status(401).json({
+      message: 'unauthorized access, token is invalid',
+    })
+  }
 }
 
 async function authSystemUserMiddleware(req, res, next) {
