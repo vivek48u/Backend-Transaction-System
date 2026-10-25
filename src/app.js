@@ -4,14 +4,25 @@ const cookieparser=require('cookie-parser')
 const authRouter=require('./routes/auth.routes')
 const accountRouter=require('./routes/account.routes')
 const transactionRouter=require('./routes/transction.routes')
+const cors = require("cors");
 
 const app=express();
+
+
+app.use(cors({
+  origin: "https://dhanadhya-bank-pj66.vercel.app/",
+  credentials: true,
+}));
 
 app.use(express.json());
 app.use(cookieparser());
 app.use('/api/auth/',authRouter)
 app.use('/api/account/',accountRouter)
 app.use('/api/transaction/',transactionRouter)
+
+app.get("/",(req,res)=>{
+   res.send('Server are running Succesfully')
+})
 
 
 module.exports=app;

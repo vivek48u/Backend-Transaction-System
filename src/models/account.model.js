@@ -22,6 +22,9 @@ const accountSchema = new mongoose.Schema({
         default: 'INR'
 
     },
+    isPrimary: { type: Boolean, default: false },
+    
+    accountNumber: { type: String, unique: true },
 
 }, {
     timestamps: true

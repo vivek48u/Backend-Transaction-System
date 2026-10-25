@@ -13,5 +13,7 @@ router.get('/',authMiddleware.authMiddleware,accountController.getUserAccountCon
 
 // GET /api/accounts/balance/:accountId
 
-router.get('/balance/:accountId',authMiddleware.authMiddleware,accountController.getAccountBalanceController)
+router.get('/primary/balance',authMiddleware.authMiddleware,accountController.getAccountBalanceController)
+
+router.patch("/:accountId/primary", authMiddleware.authMiddleware, accountController.setPrimary);
 module.exports=router;

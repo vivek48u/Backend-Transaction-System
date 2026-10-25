@@ -14,4 +14,10 @@ router.post('/',authMiddleware.authMiddleware,transactionController.createTransa
  */
 
 router.post('/system/intial-funds',authMiddleware.authSystemUserMiddleware,transactionController.createIntialFundsTransaction)
+
+
+router.get('/stats', authMiddleware.authMiddleware, transactionController.getStats)
+router.get('/entries',authMiddleware.authMiddleware,transactionController.getLedgerEntries)
+router.get('/history', authMiddleware.authMiddleware, transactionController.getHistory)
+
 module.exports=router

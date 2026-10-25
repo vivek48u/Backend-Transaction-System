@@ -108,4 +108,18 @@ async function userLogOutController(req,res){
     message:'User Logout Succesfully'
   })
 }
-module.exports = { userRegistraionController, userLoginController, userLogOutController }
+
+async function getProfile(req,res){
+    const profile=await userModel.findById(req.user._id).select("-password");
+
+
+     if (!profile) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    
+    res.status(200).json({
+      profile
+    })
+
+}
+module.exports = { userRegistraionController, userLoginController, userLogOutController,getProfile }
