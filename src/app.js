@@ -10,7 +10,7 @@ const app=express();
 
 
 app.use(cors({
-  origin: "https://dhanadhya-bank-pj66.vercel.app/",
+  origin: "https://dhanadhya-bank-mu.vercel.app",
   credentials: true,
 }));
 
