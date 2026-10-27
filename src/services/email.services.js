@@ -1,21 +1,61 @@
 require('dotenv').config()
+const crypto = require('crypto')
 const nodemailer = require('nodemailer')
 
-const BANK_NAME = 'Dhanadhya Finance'
+const BANK_NAME = process.env.BANK_NAME || 'Dhanadhya Finance'
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || process.env.EMAIL_USER || ''
 
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_APP_PASSWORD,
-  },
-})
+// ---------- transporter ----------
+// Option A (recommended for real use): any SMTP provider (Brevo, Resend, SendGrid, SES, Mailgun)
+//   set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS in .env
+// Option B (testing): Gmail with an App Password
+//   set EMAIL_USER, EMAIL_APP_PASSWORD in .env
+
+const useCustomSmtp = Boolean(process.env.SMTP_HOST)
+
+const commonOptions = {
+  pool: true, // reuse connections instead of logging in for every mail
+  maxConnections: 2,
+  maxMessages: 50,
+  rateDelta: 1000, // max 3 mails per second, avoids looking like a burst sender
+  rateLimit: 3,
+  connectionTimeout: 15000,
+  greetingTimeout: 15000,
+  socketTimeout: 20000,
+}
+
+const transporter = useCustomSmtp
+  ? nodemailer.createTransport({
+      ...commonOptions,
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT || 587),
+      secure: Number(process.env.SMTP_PORT) === 465,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+    })
+  : nodemailer.createTransport({
+      ...commonOptions,
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_APP_PASSWORD,
+      },
+    })
+
+// From address: use EMAIL_FROM (an address on your verified domain) if set,
+// otherwise fall back to the login account.
+const FROM_ADDRESS = process.env.EMAIL_FROM || process.env.EMAIL_USER
+const FROM_DOMAIN = (FROM_ADDRESS || '').split('@')[1] || 'localhost'
 
 transporter.verify((error) => {
   if (error) {
     console.error('Error connecting to email server:', error.message)
   } else {
-    console.log('Email server is ready to send messages')
+    console.log(
+      `Email server is ready (${useCustomSmtp ? process.env.SMTP_HOST : 'gmail'}), sending from ${FROM_ADDRESS}`
+    )
   }
 })
 
@@ -28,6 +68,15 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
+}
+
+function isValidEmail(value) {
+  return typeof value === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim())
+}
+
+// removes line breaks so a name can never inject extra mail headers
+function cleanHeaderText(value) {
+  return String(value ?? '').replace(/[\r\n]+/g, ' ').trim()
 }
 
 function maskAccount(accountNumber) {
@@ -53,6 +102,14 @@ function shortRef(id) {
   return id ? String(id).slice(-10).toUpperCase() : null
 }
 
+const supportLineText = SUPPORT_EMAIL
+  ? `If this was not you, please contact us at ${SUPPORT_EMAIL}.`
+  : 'If this was not you, please contact support.'
+
+const supportLineHtml = SUPPORT_EMAIL
+  ? `If this was not you, please contact us at <a href="mailto:${escapeHtml(SUPPORT_EMAIL)}" style="color:#b91c1c;">${escapeHtml(SUPPORT_EMAIL)}</a>.`
+  : 'If this was not you, please contact support.'
+
 // table based layout, sab mail apps mein ek jaisa dikhta hai
 function layout({ preheader, title, bodyHtml }) {
   return `<!DOCTYPE html>
@@ -70,7 +127,7 @@ function layout({ preheader, title, bodyHtml }) {
         <table role="presentation" width="520" cellspacing="0" cellpadding="0" border="0" style="max-width:520px;width:100%;background-color:#ffffff;border:1px solid #e2e8f0;border-radius:12px;font-family:Arial,Helvetica,sans-serif;">
           <tr>
             <td style="padding:22px 28px;border-bottom:1px solid #e2e8f0;">
-              <span style="font-size:20px;font-weight:bold;color:#1d4ed8;">${BANK_NAME}</span>
+              <span style="font-size:20px;font-weight:bold;color:#1d4ed8;">${escapeHtml(BANK_NAME)}</span>
             </td>
           </tr>
           <tr>
@@ -81,8 +138,12 @@ function layout({ preheader, title, bodyHtml }) {
           </tr>
           <tr>
             <td style="padding:18px 28px;background-color:#f8fafc;border-top:1px solid #e2e8f0;font-size:12px;line-height:1.5;color:#64748b;">
-              ${BANK_NAME} will never ask for your password, OTP or PIN by email.<br>
-              This is an automated service message about your account.
+              ${escapeHtml(BANK_NAME)} will never ask for your password, OTP or PIN by email.<br>
+              This is an automated service message about your account activity.${
+                SUPPORT_EMAIL
+                  ? `<br>Questions? Write to <a href="mailto:${escapeHtml(SUPPORT_EMAIL)}" style="color:#64748b;">${escapeHtml(SUPPORT_EMAIL)}</a>.`
+                  : ''
+              }
             </td>
           </tr>
         </table>
@@ -109,32 +170,74 @@ function detailsTable(rows) {
 
 // ---------- core sender ----------
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+// errors that are worth retrying (network or temporary server problems)
+function isTransient(error) {
+  const code = error && error.code
+  const status = error && error.responseCode
+  return (
+    ['ETIMEDOUT', 'ECONNECTION', 'ECONNRESET', 'ESOCKET', 'EDNS'].includes(code) ||
+    (typeof status === 'number' && status >= 400 && status < 500)
+  )
+}
+
 // true = mail gayi, false = fail hui (app crash nahi hota)
 const sendEmail = async (to, subject, text, html) => {
-  try {
-    const info = await transporter.sendMail({
-      from: `"${BANK_NAME}" <${process.env.EMAIL_USER}>`,
-      replyTo: process.env.EMAIL_USER,
-      to,
-      subject,
-      text,
-      html,
-    })
-    console.log('Message sent:', info.messageId)
-    return true
-  } catch (error) {
-    console.error('Error sending email:', error.message)
+  if (!isValidEmail(to)) {
+    console.error('Error sending email: invalid recipient address:', to)
     return false
   }
+  if (!FROM_ADDRESS) {
+    console.error('Error sending email: EMAIL_USER / EMAIL_FROM is not set in .env')
+    return false
+  }
+
+  const mail = {
+    from: { name: BANK_NAME, address: FROM_ADDRESS },
+    replyTo: SUPPORT_EMAIL || FROM_ADDRESS,
+    to: to.trim(),
+    subject: cleanHeaderText(subject),
+    text,
+    html,
+    // a stable Message-ID on your own domain looks more legitimate
+    messageId: `<${crypto.randomUUID()}@${FROM_DOMAIN}>`,
+    headers: {
+      // marks this as a system generated message, not bulk marketing mail
+      'Auto-Submitted': 'auto-generated',
+      'X-Auto-Response-Suppress': 'OOF, AutoReply',
+      'X-Entity-Ref-ID': crypto.randomUUID(),
+    },
+  }
+
+  const maxAttempts = 3
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const info = await transporter.sendMail(mail)
+      console.log('Message sent:', info.messageId)
+      return true
+    } catch (error) {
+      const canRetry = attempt < maxAttempts && isTransient(error)
+      console.error(
+        `Error sending email (attempt ${attempt}/${maxAttempts}):`,
+        error.message,
+        canRetry ? '- retrying' : ''
+      )
+      if (!canRetry) return false
+      await sleep(1000 * attempt)
+    }
+  }
+  return false
 }
 
 // ---------- emails ----------
 
 async function sendRegisterEmail(email, name) {
-  const subject = `Welcome to ${BANK_NAME}, ${name}`
+  const safeName = cleanHeaderText(name)
+  const subject = `Welcome to ${BANK_NAME}`
 
   const text =
-    `Hello ${name},\n\n` +
+    `Hello ${safeName},\n\n` +
     `Your ${BANK_NAME} profile has been created.\n\n` +
     `Next steps:\n` +
     `1. Log in to your dashboard\n` +
@@ -145,9 +248,9 @@ async function sendRegisterEmail(email, name) {
 
   const html = layout({
     preheader: 'Your profile has been created. Here is how to get started.',
-    title: `Welcome, ${name}`,
+    title: `Welcome, ${safeName}`,
     bodyHtml: `
-      <p style="margin:0 0 14px;">Your ${BANK_NAME} profile has been created.</p>
+      <p style="margin:0 0 14px;">Your ${escapeHtml(BANK_NAME)} profile has been created.</p>
       <p style="margin:0 0 8px;font-weight:bold;">Next steps</p>
       <ol style="margin:0 0 18px;padding-left:20px;">
         <li>Log in to your dashboard</li>
@@ -162,30 +265,31 @@ async function sendRegisterEmail(email, name) {
 }
 
 async function sendTransactionEmail(email, name, amount, toAccount, transactionId) {
+  const safeName = cleanHeaderText(name)
   const ref = shortRef(transactionId)
   const subject = `Payment of ${formatAmount(amount)} sent`
 
   const text =
-    `Hello ${name},\n\n` +
+    `Hello ${safeName},\n\n` +
     `A payment from your account was completed.\n\n` +
     `Amount: ${formatAmount(amount)}\n` +
     `To account: ${maskAccount(toAccount)}\n` +
     `Date: ${formatDate()}\n` +
     (ref ? `Reference: ${ref}\n` : '') +
-    `\nIf you did not make this payment, contact support immediately.\n\n${BANK_NAME}`
+    `\n${supportLineText}\n\n${BANK_NAME}`
 
   const html = layout({
     preheader: `${formatAmount(amount)} was sent to account ${maskAccount(toAccount)}.`,
     title: 'Payment sent',
     bodyHtml: `
-      <p style="margin:0 0 16px;">Hello ${escapeHtml(name)}, a payment from your account was completed.</p>
+      <p style="margin:0 0 16px;">Hello ${escapeHtml(safeName)}, a payment from your account was completed.</p>
       ${detailsTable([
         ['Amount', formatAmount(amount)],
         ['To account', maskAccount(toAccount)],
         ['Date', formatDate()],
         ref ? ['Reference', ref] : null,
       ])}
-      <p style="margin:18px 0 0;color:#b91c1c;font-size:13px;">If you did not make this payment, contact support immediately.</p>
+      <p style="margin:18px 0 0;color:#b91c1c;font-size:13px;">${supportLineHtml}</p>
     `,
   })
 
@@ -193,10 +297,11 @@ async function sendTransactionEmail(email, name, amount, toAccount, transactionI
 }
 
 async function sendTransactionFailureEmail(email, name, amount, toAccount) {
+  const safeName = cleanHeaderText(name)
   const subject = `Payment of ${formatAmount(amount)} could not be completed`
 
   const text =
-    `Hello ${name},\n\n` +
+    `Hello ${safeName},\n\n` +
     `Your payment could not be completed.\n\n` +
     `Amount: ${formatAmount(amount)}\n` +
     `To account: ${maskAccount(toAccount)}\n` +
@@ -207,7 +312,7 @@ async function sendTransactionFailureEmail(email, name, amount, toAccount) {
     preheader: 'No money was taken from your account.',
     title: 'Payment not completed',
     bodyHtml: `
-      <p style="margin:0 0 16px;">Hello ${escapeHtml(name)}, your payment could not be completed.</p>
+      <p style="margin:0 0 16px;">Hello ${escapeHtml(safeName)}, your payment could not be completed.</p>
       ${detailsTable([
         ['Amount', formatAmount(amount)],
         ['To account', maskAccount(toAccount)],
@@ -221,11 +326,12 @@ async function sendTransactionFailureEmail(email, name, amount, toAccount) {
 }
 
 async function sendMoneyReceivedEmail(email, name, amount, fromAccount, transactionId) {
+  const safeName = cleanHeaderText(name)
   const ref = shortRef(transactionId)
   const subject = `${formatAmount(amount)} received in your account`
 
   const text =
-    `Hello ${name},\n\n` +
+    `Hello ${safeName},\n\n` +
     `Money has been added to your account.\n\n` +
     `Amount: ${formatAmount(amount)}\n` +
     `From account: ${maskAccount(fromAccount)}\n` +
@@ -237,7 +343,7 @@ async function sendMoneyReceivedEmail(email, name, amount, fromAccount, transact
     preheader: `${formatAmount(amount)} was added to your account.`,
     title: 'Money received',
     bodyHtml: `
-      <p style="margin:0 0 16px;">Hello ${escapeHtml(name)}, money has been added to your account.</p>
+      <p style="margin:0 0 16px;">Hello ${escapeHtml(safeName)}, money has been added to your account.</p>
       ${detailsTable([
         ['Amount', formatAmount(amount)],
         ['From account', maskAccount(fromAccount)],
@@ -251,29 +357,30 @@ async function sendMoneyReceivedEmail(email, name, amount, fromAccount, transact
 }
 
 async function sendAccountCreatedEmail(email, name, accountNumber, isPrimary) {
+  const safeName = cleanHeaderText(name)
   const subject = `Your new ${BANK_NAME} account is ready`
 
   const text =
-    `Hello ${name},\n\n` +
+    `Hello ${safeName},\n\n` +
     `A new bank account has been created.\n\n` +
     `Account number: ${maskAccount(accountNumber)}\n` +
     `Primary account: ${isPrimary ? 'Yes' : 'No'}\n` +
     `Date: ${formatDate()}\n\n` +
     `You can see the full account number in your dashboard under Account.\n` +
-    `If you did not create this account, contact support immediately.\n\n${BANK_NAME}`
+    `${supportLineText}\n\n${BANK_NAME}`
 
   const html = layout({
     preheader: `New account ${maskAccount(accountNumber)} has been created.`,
     title: 'New account created',
     bodyHtml: `
-      <p style="margin:0 0 16px;">Hello ${escapeHtml(name)}, a new bank account has been created.</p>
+      <p style="margin:0 0 16px;">Hello ${escapeHtml(safeName)}, a new bank account has been created.</p>
       ${detailsTable([
         ['Account number', maskAccount(accountNumber)],
         ['Primary account', isPrimary ? 'Yes' : 'No'],
         ['Date', formatDate()],
       ])}
       <p style="margin:18px 0 0;color:#64748b;font-size:13px;">You can see the full account number in your dashboard under Account.</p>
-      <p style="margin:10px 0 0;color:#b91c1c;font-size:13px;">If you did not create this account, contact support immediately.</p>
+      <p style="margin:10px 0 0;color:#b91c1c;font-size:13px;">${supportLineHtml}</p>
     `,
   })
 
@@ -281,11 +388,12 @@ async function sendAccountCreatedEmail(email, name, accountNumber, isPrimary) {
 }
 
 async function sendFundsAddedEmail(email, name, amount, toAccount, transactionId) {
+  const safeName = cleanHeaderText(name)
   const ref = shortRef(transactionId)
   const subject = `${formatAmount(amount)} added to your account`
 
   const text =
-    `Hello ${name},\n\n` +
+    `Hello ${safeName},\n\n` +
     `Funds have been added to your account.\n\n` +
     `Amount: ${formatAmount(amount)}\n` +
     `Account: ${maskAccount(toAccount)}\n` +
@@ -297,7 +405,7 @@ async function sendFundsAddedEmail(email, name, amount, toAccount, transactionId
     preheader: `${formatAmount(amount)} was added to account ${maskAccount(toAccount)}.`,
     title: 'Funds added',
     bodyHtml: `
-      <p style="margin:0 0 16px;">Hello ${escapeHtml(name)}, funds have been added to your account.</p>
+      <p style="margin:0 0 16px;">Hello ${escapeHtml(safeName)}, funds have been added to your account.</p>
       ${detailsTable([
         ['Amount', formatAmount(amount)],
         ['Account', maskAccount(toAccount)],
@@ -318,5 +426,5 @@ module.exports = {
   sendTransactionFailureEmail,
   sendMoneyReceivedEmail,
   sendAccountCreatedEmail,
-  sendFundsAddedEmail
+  sendFundsAddedEmail,
 }
